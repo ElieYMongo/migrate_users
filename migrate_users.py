@@ -72,6 +72,7 @@ ROLES_TO_DROP = {
     "clusterAdmin",  
     "clusterManager",  
     "hostManager",  
+    "bypassWriteBlockingMode"
 }  
   
 # Databases that Atlas doesn't allow user-defined roles/access on  
