@@ -2,19 +2,26 @@
 MongoDB On-Prem to Atlas User Migration Script (All Databases)  
   
 This script:  
-1. Connects to an on-prem MongoDB instance using pymongo  
-2. Reads ALL database users from ALL databases and their roles  
-3. Creates corresponding users in Atlas via the Atlas Admin API  
+1. Reads user passwords from a passwords.txt file  
+2. Connects to an on-prem MongoDB instance using pymongo  
+3. Reads ALL database users from ALL databases and their roles  
+4. Creates corresponding users in Atlas via the Atlas Admin API  
   
 Prerequisites:  
     pip install pymongo requests  
   
 Configuration:  
     Set the variables below or use environment variables.  
+  
+Passwords File Format (passwords.txt):  
+    username,password  
+    user1,P@ssw0rd123  
+    user2,P@ssw0rd124  
 """  
   
 import os  
 import sys  
+import csv  
 import json  
 import logging  
 import requests  
@@ -38,9 +45,8 @@ ATLAS_PROJECT_ID = os.environ.get("ATLAS_PROJECT_ID", "your-atlas-project-id")
 # Atlas Admin API base URL  
 ATLAS_API_BASE_URL = "https://cloud.mongodb.com/api/atlas/v2"  
   
-# Default password for migrated users (users should change this immediately)  
-# Atlas requires a password for SCRAM users  
-DEFAULT_PASSWORD = os.environ.get("DEFAULT_PASSWORD", "ChangeMe123!@#Temporary")  
+# Path to passwords file  
+PASSWORDS_FILE = os.environ.get("PASSWORDS_FILE", "passwords.txt")  
   
 # Dry run mode - set to False to actually create users  
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"  
@@ -101,6 +107,101 @@ SYSTEM_USERS_TO_SKIP = {
     "mms-monitoring-agent",  
     "mms-backup-agent",  
 }  
+  
+# ---------------------------------------------------------------------------  
+# Password Loading  
+# ---------------------------------------------------------------------------  
+  
+  
+def load_passwords(filepath: str) -> dict:  
+    """  
+    Load user passwords from a CSV file.  
+  
+    Expected format:  
+        username,password  
+        user1,P@ssw0rd123  
+        user2,P@ssw0rd124  
+  
+    The first line is treated as a header and skipped.  
+  
+    Args:  
+        filepath: Path to the passwords.txt file  
+  
+    Returns:  
+        Dictionary mapping username -> password  
+    """  
+    passwords = {}  
+  
+    if not os.path.exists(filepath):  
+        logger.error(f"Passwords file not found: {filepath}")  
+        logger.error("Please create a passwords.txt file with format:")  
+        logger.error("  username,password")  
+        logger.error("  user1,P@ssw0rd123")  
+        logger.error("  user2,P@ssw0rd124")  
+        sys.exit(1)  
+  
+    try:  
+        with open(filepath, "r", encoding="utf-8") as f:  
+            reader = csv.reader(f)  
+  
+            # Read header line  
+            header = next(reader, None)  
+            if header is None:  
+                logger.error(f"Passwords file is empty: {filepath}")  
+                sys.exit(1)  
+  
+            # Validate header  
+            header_lower = [col.strip().lower() for col in header]  
+            if "username" not in header_lower or "password" not in header_lower:  
+                logger.warning(  
+                    f"  Passwords file header doesn't contain 'username,password'. "  
+                    f"Found: {header}. Treating first column as username, second as password."  
+                )  
+  
+            # Determine column indices  
+            try:  
+                username_idx = header_lower.index("username")  
+                password_idx = header_lower.index("password")  
+            except ValueError:  
+                # Default to first two columns  
+                username_idx = 0  
+                password_idx = 1  
+  
+            # Read data rows  
+            line_num = 1  
+            for row in reader:  
+                line_num += 1  
+                if not row or len(row) < 2:  
+                    logger.warning(f"  Skipping malformed line {line_num} in passwords file: {row}")  
+                    continue  
+  
+                username = row[username_idx].strip()  
+                password = row[password_idx].strip()  
+  
+                if not username:  
+                    logger.warning(f"  Skipping line {line_num} with empty username")  
+                    continue  
+  
+                if not password:  
+                    logger.warning(f"  Skipping line {line_num} - empty password for user '{username}'")  
+                    continue  
+  
+                if username in passwords:  
+                    logger.warning(f"  Duplicate entry for user '{username}' on line {line_num}. Using latest.")  
+  
+                passwords[username] = password  
+  
+        logger.info(f"Loaded passwords for {len(passwords)} users from '{filepath}'")  
+        logger.info(f"  Users with passwords: {list(passwords.keys())}")  
+        return passwords  
+  
+    except csv.Error as e:  
+        logger.error(f"Error parsing passwords file: {e}")  
+        sys.exit(1)  
+    except IOError as e:  
+        logger.error(f"Error reading passwords file: {e}")  
+        sys.exit(1)  
+  
   
 # ---------------------------------------------------------------------------  
 # Helper Functions  
@@ -388,19 +489,24 @@ def migrate_users():
         logger.info("*** DRY RUN MODE - No users will be created ***")  
         logger.info("")  
   
-    # Step 1: Read users from ALL databases on source  
+    # Step 1: Load passwords from file  
+    logger.info(f"Loading passwords from '{PASSWORDS_FILE}'...")  
+    passwords = load_passwords(PASSWORDS_FILE)  
+  
+    # Step 2: Read users from ALL databases on source  
     users = get_source_users(SOURCE_MONGO_URI)  
   
     if not users:  
         logger.info("No users found to migrate.")  
         return  
   
-    # Step 2: Process and migrate each user  
+    # Step 3: Process and migrate each user  
     results = {  
         "success": [],  
         "skipped": [],  
         "failed": [],  
         "no_roles": [],  
+        "no_password": [],  
     }  
   
     # Group users by auth database for clear reporting  
@@ -461,12 +567,28 @@ def migrate_users():
   
         logger.info(f"  Atlas roles: {atlas_roles}")  
   
+        # Get password for this user  
+        # $external users (LDAP/X.509) don't need passwords  
+        if auth_db == "$external":  
+            user_password = None  
+            logger.info(f"  $external user - no password required.")  
+        else:  
+            user_password = passwords.get(username)  
+            if not user_password:  
+                logger.error(  
+                    f"  No password found for user '{username}' in {PASSWORDS_FILE}. "  
+                    f"Skipping user."  
+                )  
+                results["no_password"].append(f"{auth_db}.{username}")  
+                continue  
+            logger.info(f"  Password found in passwords file.")  
+  
         # Create user in Atlas  
         response = create_atlas_user(  
             username=username,  
             database=auth_db,  
             roles=atlas_roles,  
-            password=DEFAULT_PASSWORD,  
+            password=user_password,  
         )  
   
         if response.get("status") == "error":  
@@ -476,15 +598,16 @@ def migrate_users():
         else:  
             results["success"].append(f"{auth_db}.{username}")  
   
-    # Step 3: Print summary  
+    # Step 4: Print summary  
     logger.info("\n" + "=" * 60)  
     logger.info("Migration Summary")  
     logger.info("=" * 60)  
-    logger.info(f"  Total users found:     {len(users)}")  
-    logger.info(f"  Successfully created:  {len(results['success'])}")  
-    logger.info(f"  Skipped:               {len(results['skipped'])}")  
-    logger.info(f"  No valid roles:        {len(results['no_roles'])}")  
-    logger.info(f"  Failed:                {len(results['failed'])}")  
+    logger.info(f"  Total users found:       {len(users)}")  
+    logger.info(f"  Successfully created:    {len(results['success'])}")  
+    logger.info(f"  Skipped:                 {len(results['skipped'])}")  
+    logger.info(f"  No valid roles:          {len(results['no_roles'])}")  
+    logger.info(f"  No password in file:     {len(results['no_password'])}")  
+    logger.info(f"  Failed:                  {len(results['failed'])}")  
   
     if results["success"]:  
         logger.info(f"\n  Created users: {results['success']}")  
@@ -495,17 +618,16 @@ def migrate_users():
     if results["no_roles"]:  
         logger.warning(f"\n  Users with no valid Atlas roles: {results['no_roles']}")  
   
+    if results["no_password"]:  
+        logger.error(  
+            f"\n  Users missing from passwords file: {results['no_password']}"  
+            f"\n  Please add these users to '{PASSWORDS_FILE}' and re-run."  
+        )  
+  
     if results["skipped"]:  
         logger.info(f"\n  Skipped users: {results['skipped']}")  
   
-    if not DRY_RUN and results["success"]:  
-        logger.warning(  
-            "\n⚠️  IMPORTANT: All migrated SCRAM users have been created with a "  
-            "temporary password. Please ensure users reset their passwords "  
-            "immediately!"  
-        )  
-  
-  
+      
 # ---------------------------------------------------------------------------  
 # Entry Point  
 # ---------------------------------------------------------------------------  
