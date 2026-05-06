@@ -319,6 +319,7 @@ def create_atlas_user(username: str, database: str, roles: list, password: str) 
         "databaseName": "admin",  # auth database  
         "username": username,  
         "roles": roles,  
+        "groupId": ATLAS_PROJECT_ID,  
     }  
   
     # Only include password for SCRAM auth users (databaseName = "admin" or other dbs)  
