@@ -72,7 +72,9 @@ ROLES_TO_DROP = {
     "clusterAdmin",  
     "clusterManager",  
     "hostManager",  
-    "bypassWriteBlockingMode"
+    "bypassWriteBlockingMode",
+    "userAdminAnyDatabase",  
+    "userAdmin",  
 }  
   
 # Databases that Atlas doesn't allow user-defined roles/access on  
@@ -87,8 +89,6 @@ ATLAS_VALID_ROLES = {
     "readWrite",  
     "dbAdmin",  
     "dbAdminAnyDatabase",  
-    "userAdminAnyDatabase",  
-    "userAdmin",  
     "clusterMonitor",  
     "enableSharding",  
 }  
