@@ -316,7 +316,7 @@ def create_atlas_user(username: str, database: str, roles: list, password: str) 
     url = f"{ATLAS_API_BASE_URL}/groups/{ATLAS_PROJECT_ID}/databaseUsers"  
   
     payload = {  
-        "databaseName": database,  # auth database  
+        "databaseName": "admin",  # auth database  
         "username": username,  
         "roles": roles,  
     }  
