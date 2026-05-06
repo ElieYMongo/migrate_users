@@ -73,6 +73,7 @@ ROLES_TO_DROP = {
     "clusterManager",  
     "hostManager",  
     "bypassWriteBlockingMode",
+    "canBypassWriteBlockingMode",
     "userAdminAnyDatabase",  
     "userAdmin",  
 }  
